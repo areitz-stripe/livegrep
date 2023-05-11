@@ -40,6 +40,10 @@ type Config struct {
 	// for site-specific customizations
 	HeaderHTML template.HTML `json:"header_html"`
 
+	// HTML injected into layout template
+	// just before </body> for site-specific customization
+	FooterHTML template.HTML `json:"footer_html"`
+
 	Sentry struct {
 		URI string `json:"uri"`
 	} `json:"sentry"`
@@ -59,6 +63,12 @@ type Config struct {
 	DefaultSearchRepos []string `json:"default_search_repos"`
 
 	LinkConfigs []LinkConfig `json:"file_links"`
+
+	// Maximum gRPC receive message size in bytes: this allows larger result sets from codesearch
+	GrpcMaxRecvMessageSize int `json:"grpc_max_recv_message_size"`
+
+	// Maximum gRPC send message size in bytes: this allows larger queries to codesearch
+	GrpcMaxSendMessageSize int `json:"grpc_max_send_message_size"`
 }
 
 type IndexConfig struct {
@@ -79,6 +89,7 @@ type LinkConfig struct {
 	Label            string `json:"label"`
 	UrlTemplate      string `json:"url_template"`
 	WhitelistPattern string `json:"whitelist_pattern"`
+	Target           string `json:"target"`
 }
 
 type LangServer struct {

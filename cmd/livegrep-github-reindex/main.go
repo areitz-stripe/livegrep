@@ -16,6 +16,7 @@ import (
 	"sync"
 
 	"github.com/google/go-github/github"
+	"github.com/livegrep/livegrep/src/proto/config"
 
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
@@ -24,7 +25,8 @@ import (
 const BLDeprecatedMessage = "This flag has been deprecated and will be removed in a future release. Please switch to the '-ignorelist' option."
 
 var (
-	flagCodesearch   = flag.String("codesearch", path.Join(path.Dir(os.Args[0]), "codesearch"), "Path to the `codesearch` binary")
+	flagCodesearch   = flag.String("codesearch", "", "Path to the `codesearch` binary")
+	flagFetchReindex = flag.String("fetch-reindex", "", "Path to the `livegrep-fetch-reindex` binary")
 	flagApiBaseUrl   = flag.String("api-base-url", "https://api.github.com/", "Github API base url")
 	flagGithubKey    = flag.String("github-key", os.Getenv("GITHUB_KEY"), "Github API key")
 	flagRepoDir      = flag.String("dir", "repos", "Directory to store repos")
@@ -34,19 +36,24 @@ var (
 		display: "${dir}/livegrep.idx",
 		fn:      func() string { return path.Join(*flagRepoDir, "livegrep.idx") },
 	}
-	flagRevision     = flag.String("revision", "HEAD", "git revision to index")
-	flagRevparse     = flag.Bool("revparse", true, "whether to `git rev-parse` the provided revision in generated links")
-	flagName         = flag.String("name", "livegrep index", "The name to be stored in the index file")
-	flagForks        = flag.Bool("forks", true, "whether to index repositories that are github forks, and not original repos")
-	flagArchived     = flag.Bool("archived", false, "whether to index repositories that are archived on github")
-	flagHTTP         = flag.Bool("http", false, "clone repositories over HTTPS instead of SSH")
-	flagHTTPUsername = flag.String("http-user", "", "Override the username to use when cloning over https")
-	flagInstallation = flag.Bool("installation-token", false, "Treat the API key as a Github Application Installation Key when cloning")
-	flagDepth        = flag.Int("depth", 0, "clone repository with specify --depth=N depth.")
-	flagSkipMissing  = flag.Bool("skip-missing", false, "skip repositories where the specified revision is missing")
-	flagRepos        = stringList{}
-	flagOrgs         = stringList{}
-	flagUsers        = stringList{}
+	flagRevision                = flag.String("revision", "HEAD", "git revision to index")
+	flagUrlPattern              = flag.String("url-pattern", "https://github.com/{name}/blob/{version}/{path}#L{lno}", "when using the local frontend fileviewer, this string will be used to construt a link to the file source on github")
+	flagName                    = flag.String("name", "livegrep index", "The name to be stored in the index file")
+	flagNumRepoUpdateWorkers    = flag.String("num-repo-update-workers", "8", "Number of workers fetch-reindex will use to update repositories")
+	flagRevparse                = flag.Bool("revparse", true, "whether to `git rev-parse` the provided revision in generated links")
+	flagForks                   = flag.Bool("forks", true, "whether to index repositories that are github forks, and not original repos")
+	flagArchived                = flag.Bool("archived", false, "whether to index repositories that are archived on github")
+	flagHTTP                    = flag.Bool("http", false, "clone repositories over HTTPS instead of SSH")
+	flagHTTPUsername            = flag.String("http-user", "git", "Override the username to use when cloning over https")
+	flagInstallation            = flag.Bool("installation-token", false, "Treat the API key as a Github Application Installation Key when cloning")
+	flagDepth                   = flag.Int("depth", 0, "clone repository with specify --depth=N depth.")
+	flagSkipMissing             = flag.Bool("skip-missing", false, "skip repositories where the specified revision is missing")
+	flagMaxConcurrentGHRequests = flag.Int("max-concurrent-gh-requests", 1, "Applied per org/user. If fetching 2 orgs, you will have 2x{yourInput} network calls possible at a time")
+	flagNoIndex                 = flag.Bool("no-index", false, "Skip indexing after writing config and fetching")
+
+	flagRepos = stringList{}
+	flagOrgs  = stringList{}
+	flagUsers = stringList{}
 )
 
 func init() {
@@ -125,10 +132,6 @@ func main() {
 
 	sort.Sort(ReposByName(repos))
 
-	if err := checkoutRepos(repos, *flagRepoDir, *flagDepth, *flagHTTP); err != nil {
-		log.Fatalln(err.Error())
-	}
-
 	config, err := buildConfig(*flagName, *flagRepoDir, repos, *flagRevision)
 	if err != nil {
 		log.Fatalln(err.Error())
@@ -139,29 +142,51 @@ func main() {
 	}
 
 	index := flagIndexPath.Get().(string)
-	tmp := index + ".tmp"
 
 	args := []string{
-		"--debug=ui",
-		"--dump_index",
-		tmp,
-		"--index_only",
+		"--out", index,
+		"--codesearch", *flagCodesearch,
+		"--num-workers", *flagNumRepoUpdateWorkers,
+	}
+	if *flagNoIndex {
+		args = append(args, "--no-index")
 	}
 	if *flagRevparse {
 		args = append(args, "--revparse")
 	}
+	if *flagSkipMissing {
+		args = append(args, "--skip-missing")
+	}
 	args = append(args, configPath)
 
-	cmd := exec.Command(*flagCodesearch, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Fatalln(err)
+	if *flagFetchReindex == "" {
+		fr := findBinary("livegrep-fetch-reindex")
+		flagFetchReindex = &fr
 	}
 
-	if err := os.Rename(tmp, index); err != nil {
-		log.Fatalln("rename:", err.Error())
+	log.Printf("Running: %s %v\n", *flagFetchReindex, args)
+	cmd := exec.Command(*flagFetchReindex, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if *flagGithubKey != "" {
+		cmd.Env = append(os.Environ(), fmt.Sprintf("GITHUB_KEY=%s", *flagGithubKey))
 	}
+	if err := cmd.Run(); err != nil {
+		log.Fatalln("livegrep-fetch-reindex: ", err)
+	}
+}
+
+func findBinary(name string) string {
+	paths := []string{
+		path.Join(path.Dir(os.Args[0]), name),
+		strings.Replace(os.Args[0], path.Base(os.Args[0]), name, -1),
+	}
+	for _, try := range paths {
+		if st, err := os.Stat(try); err == nil && (st.Mode()&os.ModeDir) == 0 {
+			return try
+		}
+	}
+	return name
 }
 
 type ReposByName []*github.Repository
@@ -308,210 +333,113 @@ func getOneRepo(client *github.Client, repo string) ([]*github.Repository, error
 	return []*github.Repository{ghRepo}, nil
 }
 
-func getOrgRepos(client *github.Client, org string) ([]*github.Repository, error) {
+type IndexedResponse struct {
+	Page  int
+	Org   string
+	Repos []*github.Repository
+	err   error
+}
+
+func callGitHubConcurrently(initialResp *github.Response, concurrencyLimit int, firstResult []*github.Repository, gClient *github.Client, method string, org string, user string) ([]*github.Repository, error) {
+	pagesToCall := initialResp.LastPage - 1
+
+	// create the matrix of results and add the first one - this is so we can maintain order
+	// which unfortunately takes an extra O(n) pass
+	resultsMatrix := make([][]*github.Repository, pagesToCall+1)
+	resultsMatrix[0] = firstResult
+
+	semaphores := make(chan bool, concurrencyLimit)
+	resStream := make(chan *IndexedResponse, pagesToCall)
+	var wg sync.WaitGroup
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	for i := 1; i <= pagesToCall; i++ {
+		wg.Add(1)
+
+		go func(ctx context.Context, page int, c chan *IndexedResponse, s chan bool, w *sync.WaitGroup) {
+			s <- true // aquire semaphore
+			defer w.Done()
+
+			var repos []*github.Repository
+			var err error
+			if method == "org" {
+				repos, _, err = gClient.Repositories.ListByOrg(ctx, org, &github.RepositoryListByOrgOptions{
+					ListOptions: github.ListOptions{PerPage: 100, Page: page},
+				})
+			} else if method == "user" {
+				repos, _, err = gClient.Repositories.List(ctx, user, &github.RepositoryListOptions{
+					ListOptions: github.ListOptions{PerPage: 100, Page: page},
+				})
+			}
+
+			c <- &IndexedResponse{
+				Page:  page,
+				Repos: repos,
+				Org:   org,
+				err:   err,
+			}
+			<-s // release semaphore
+		}(ctx, i+1, resStream, semaphores, &wg) // + 1 because pages are 1 based, and we already called 1st to start with
+	}
+
+	// close the channel in the background
+	go func() {
+		wg.Wait()
+		close(resStream)
+		close(semaphores)
+	}()
+
+	for res := range resStream {
+		if res.err != nil {
+			return nil, res.err // cancel will be called after this early return
+		}
+		resultsMatrix[res.Page-1] = res.Repos // Page index is 1 based
+	}
+
+	// Now flatten the matrix and return it
 	var buf []*github.Repository
-	opt := &github.RepositoryListByOrgOptions{
-		ListOptions: github.ListOptions{PerPage: 50},
+	for _, res := range resultsMatrix {
+		buf = append(buf, res...)
 	}
-	for {
-		repos, resp, err := client.Repositories.ListByOrg(context.TODO(), org, opt)
-		if err != nil {
-			return nil, err
-		}
-		buf = append(buf, repos...)
-		if resp.NextPage == 0 {
-			break
-		}
-		opt.ListOptions.Page = resp.NextPage
-	}
+
 	return buf, nil
+}
+
+func getOrgRepos(client *github.Client, org string) ([]*github.Repository, error) {
+	log.Printf("Fetching repositories for organization: %s", org)
+
+	opt := &github.RepositoryListByOrgOptions{
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+	repos, resp, err := client.Repositories.ListByOrg(context.TODO(), org, opt)
+
+	if err != nil {
+		return nil, err
+	} else if resp.FirstPage == resp.LastPage { // if no more pages, return early
+		return repos, nil
+	}
+
+	// when flagMaxConcurrentGHRequests is 1 (default), behaves synchronously
+	return callGitHubConcurrently(resp, *flagMaxConcurrentGHRequests, repos, client, "org", org, "")
 }
 
 func getUserRepos(client *github.Client, user string) ([]*github.Repository, error) {
-	var buf []*github.Repository
+	log.Printf("Fetching repositories for user: %s", user)
+
 	opt := &github.RepositoryListOptions{
-		ListOptions: github.ListOptions{PerPage: 50},
+		ListOptions: github.ListOptions{PerPage: 100},
 	}
-	for {
-		repos, resp, err := client.Repositories.List(context.TODO(), user, opt)
-		if err != nil {
-			return nil, err
-		}
-		buf = append(buf, repos...)
-		if resp.NextPage == 0 {
-			break
-		}
-		opt.ListOptions.Page = resp.NextPage
-	}
-	return buf, nil
-}
-
-func checkoutRepos(repos []*github.Repository, dir string, depth int, http bool) error {
-	repoc := make(chan *github.Repository)
-	errc := make(chan error, Workers)
-	stop := make(chan struct{})
-	wg := sync.WaitGroup{}
-	wg.Add(Workers)
-	for i := 0; i < Workers; i++ {
-		go func() {
-			defer wg.Done()
-			checkoutWorker(dir, depth, http, repoc, stop, errc)
-		}()
-	}
-
-	var err error
-Repos:
-	for i := range repos {
-		select {
-		case repoc <- repos[i]:
-		case err = <-errc:
-			close(stop)
-			break Repos
-		}
-	}
-
-	close(repoc)
-	wg.Wait()
-	select {
-	case err = <-errc:
-	default:
-	}
-
-	return err
-}
-
-func checkoutWorker(dir string,
-	depth int,
-	http bool,
-	c <-chan *github.Repository,
-	stop <-chan struct{}, errc chan error) {
-	for {
-		select {
-		case r, ok := <-c:
-			if !ok {
-				return
-			}
-			err := checkoutOne(dir, depth, http, r)
-			if err != nil {
-				errc <- err
-			}
-		case <-stop:
-			return
-		}
-	}
-}
-
-const credentialHelperScript = (`#!/bin/sh
-if test "$1" = "get"; then
-  pass=` + "`cat <&3`" + `
-  if test -n "$LIVEGREP_GITHUB_USERNAME"; then
-    echo "username=$LIVEGREP_GITHUB_USERNAME"
-    echo "password=$pass"
-  else
-    echo "username=$pass"
-  fi
-fi
-`)
-
-func callGit(program string, args []string, key string) error {
-	var err error
-
-	if key != "" {
-		// If we're given an oauth key, pass it to git
-		// via a credential helper
-		//
-		// In order to avoid the key hitting the
-		// filesystem, we pass the actual key via a
-		// pipe on fd `3`, and we set the askpass
-		// script to a tiny sh script that just reads
-		// from that pipe.
-		f, err := ioutil.TempFile("", "livegrep-credential-helper")
-		if err != nil {
-			return err
-		}
-		f.WriteString(credentialHelperScript)
-		f.Close()
-		defer os.Remove(f.Name())
-
-		os.Chmod(f.Name(), 0700)
-		args = append([]string{"-c", fmt.Sprintf("credential.helper=%s", f.Name())}, args...)
-	}
-
-	for i := 0; i < 3; i++ {
-		cmd := exec.Command("git", args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if key != "" {
-			r, w, err := os.Pipe()
-			if err != nil {
-				return err
-			}
-
-			cmd.ExtraFiles = []*os.File{r}
-
-			go func() {
-				defer w.Close()
-				w.WriteString(key)
-			}()
-			defer r.Close()
-		}
-		if *flagHTTPUsername != "" {
-			cmd.Env = append(os.Environ(), fmt.Sprintf("LIVEGREP_GITHUB_USERNAME=%s", *flagHTTPUsername))
-		}
-		if err = cmd.Run(); err == nil {
-			return nil
-		}
-	}
-	return fmt.Errorf("%s %v: %s", program, args, err.Error())
-}
-
-func checkoutOne(dir string, depth int, http bool, r *github.Repository) error {
-	log.Println("Updating", *r.FullName)
-	checkout := path.Join(dir, *r.FullName)
-	out, err := exec.Command("git", "--git-dir", checkout, "rev-parse", "--is-bare-repository").Output()
+	repos, resp, err := client.Repositories.List(context.TODO(), user, opt)
 	if err != nil {
-		if _, ok := err.(*exec.ExitError); !ok {
-			return err
-		}
-	}
-	if strings.Trim(string(out), " \n") != "true" {
-		if err := os.RemoveAll(checkout); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(checkout, 0755); err != nil {
-			return err
-		}
-		var remote string
-		if http {
-			remote = *r.CloneURL
-		} else {
-			remote = *r.SSHURL
-		}
-		args := []string{"clone", "--mirror"}
-		if depth != 0 {
-			args = append(args, fmt.Sprintf("--depth=%d", depth))
-		}
-		args = append(args, remote, checkout)
-		return callGit("git", args, *flagGithubKey)
+		return nil, err
+	} else if resp.FirstPage == resp.LastPage { // if no more pages, return early
+		return repos, nil
 	}
 
-	args := []string{"--git-dir", checkout, "fetch", "-p"}
-	if depth != 0 {
-		args = append(args, fmt.Sprintf("--depth=%d", depth))
-	}
-	return callGit("git", args, *flagGithubKey)
-}
-
-type IndexConfig struct {
-	Name         string       `json:"name"`
-	Repositories []RepoConfig `json:"repositories"`
-}
-
-type RepoConfig struct {
-	Path      string            `json:"path"`
-	Name      string            `json:"name"`
-	Revisions []string          `json:"revisions"`
-	Metadata  map[string]string `json:"metadata"`
+	// when flagMaxConcurrentGHRequests is 1 (default), behaves synchronously
+	return callGitHubConcurrently(resp, *flagMaxConcurrentGHRequests, repos, client, "user", "", user)
 }
 
 func writeConfig(config []byte, file string) error {
@@ -526,7 +454,7 @@ func buildConfig(name string,
 	dir string,
 	repos []*github.Repository,
 	revision string) ([]byte, error) {
-	cfg := IndexConfig{
+	cfg := config.IndexSpec{
 		Name: name,
 	}
 
@@ -546,12 +474,31 @@ func buildConfig(name string,
 				continue
 			}
 		}
-		cfg.Repositories = append(cfg.Repositories, RepoConfig{
+		var remote string
+		if *flagHTTP {
+			remote = *r.CloneURL
+		} else {
+			remote = *r.SSHURL
+		}
+
+		var password_env string
+		if *flagGithubKey != "" {
+			password_env = "GITHUB_KEY"
+		}
+
+		cfg.Repositories = append(cfg.Repositories, &config.RepoSpec{
 			Path:      path.Join(dir, *r.FullName),
 			Name:      *r.FullName,
 			Revisions: []string{revision},
-			Metadata: map[string]string{
-				"github": *r.HTMLURL,
+			Metadata: &config.Metadata{
+				Github:     *r.HTMLURL,
+				Remote:     remote,
+				UrlPattern: *flagUrlPattern,
+			},
+			CloneOptions: &config.CloneOptions{
+				Depth:       int32(*flagDepth),
+				Username:    *flagHTTPUsername,
+				PasswordEnv: password_env,
 			},
 		})
 	}

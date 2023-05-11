@@ -3,13 +3,11 @@ workspace(name = "com_github_livegrep_livegrep")
 load(
     "@bazel_tools//tools/build_defs/repo:git.bzl",
     "git_repository",
-    "new_git_repository",
 )
 load(
     "@bazel_tools//tools/build_defs/repo:http.bzl",
     "http_archive",
 )
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
     name = "divsufsort",
@@ -21,13 +19,6 @@ http_archive(
 )
 
 git_repository(
-    name = "com_googlesource_code_re2",
-    commit = "767de83bb7e4bfe3a2d8aec0ec79f9f1f66da30a",
-    remote = "https://github.com/google/re2",
-    shallow_since = "1535650560 +0000",
-)
-
-git_repository(
     name = "gflags",
     commit = "e171aa2d15ed9eb17054558e0b3a6a413bb01067",  # v2.2.2
     remote = "https://github.com/gflags/gflags",
@@ -36,9 +27,8 @@ git_repository(
 
 git_repository(
     name = "com_github_nelhage_rules_boost",
-    commit = "c1d618315fa152958baef8ea0d77043eebf7f573",
+    commit = "03a871125484f8bea934761d5e8673f5d4979b57",
     remote = "https://github.com/nelhage/rules_boost",
-    shallow_since = "1546641660 -0600",
 )
 # local_repository(
 #   name = "com_github_nelhage_boost",
@@ -52,33 +42,27 @@ load(
 
 boost_deps()
 
-git_repository(
-    name = "com_google_absl",
-    commit = "5e0dcf72c64fae912184d2e0de87195fe8f0a425",
-    remote = "https://github.com/abseil/abseil-cpp",
-)
-
 http_archive(
     name = "io_bazel_rules_go",
-    sha256 = "842ec0e6b4fbfdd3de6150b61af92901eeb73681fd4d185746644c338f51d4c0",
+    sha256 = "099a9fb96a376ccbbb7d291ed4ecbdfd42f6bc822ab77ae6f1b5cb9e914e94fa",
     urls = [
-        "https://storage.googleapis.com/bazel-mirror/github.com/bazelbuild/rules_go/releases/download/v0.20.1/rules_go-v0.20.1.tar.gz",
-        "https://github.com/bazelbuild/rules_go/releases/download/v0.20.1/rules_go-v0.20.1.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_go/releases/download/v0.35.0/rules_go-v0.35.0.zip",
+        "https://github.com/bazelbuild/rules_go/releases/download/v0.35.0/rules_go-v0.35.0.zip",
     ],
 )
 
 git_repository(
     name = "bazel_gazelle",
-    commit = "e443c54b396a236e0d3823f46c6a931e1c9939f2",  # 0.17.0
+    commit = "3ea1d64d6fe943dac06c341f9a265472bb99acd7",  # 0.24.0
     remote = "https://github.com/bazelbuild/bazel-gazelle.git",
-    shallow_since = "1551292640 -0800",
+    shallow_since = "1633971621 -0400",
 )
 
 load("@io_bazel_rules_go//go:deps.bzl", "go_register_toolchains", "go_rules_dependencies")
 
 go_rules_dependencies()
 
-go_register_toolchains()
+go_register_toolchains(version = "1.19.2")
 
 load("@bazel_gazelle//:deps.bzl", "gazelle_dependencies")
 
@@ -101,9 +85,9 @@ http_archive(
 
 git_repository(
     name = "com_github_grpc_grpc",
-    commit = "a6c7b66f756ba8d4d87ee2b28e004e0ad3a642c9",
+    commit = "591d56e1300b6d11948e1b821efac785a295989c",  # 1.44.0
     remote = "https://github.com/grpc/grpc.git",
-    #    shallow_since = "1572095092 -0700",
+    shallow_since = "1644573434 +0100",
 )
 
 load("@com_github_grpc_grpc//bazel:grpc_deps.bzl", "grpc_deps")
@@ -120,15 +104,6 @@ git_repository(
     remote = "https://github.com/bazelbuild/buildifier.git",
 )
 
-local_repository(
-    name = "org_dropbox_rules_node",
-    path = "tools/org_dropbox_rules_node",
-)
-
-load("@org_dropbox_rules_node//node:defs.bzl", "node_repositories")
-
-node_repositories()
-
 git_repository(
     name = "com_grail_bazel_compdb",
     commit = "7658de071fcd072163c24cc96d78e9891d4d81f5",
@@ -140,3 +115,34 @@ git_repository(
     commit = "0ea2d8f8fa1601abb9ce713b7414e7b86f90bc61",
     remote = "https://github.com/google/googletest",
 )
+
+http_archive(
+    name = "aspect_rules_js",
+    sha256 = "66ecc9f56300dd63fb86f11cfa1e8affcaa42d5300e2746dba08541916e913fd",
+    strip_prefix = "rules_js-1.13.0",
+    url = "https://github.com/aspect-build/rules_js/archive/refs/tags/v1.13.0.tar.gz",
+)
+
+load("@aspect_rules_js//js:repositories.bzl", "rules_js_dependencies")
+
+rules_js_dependencies()
+
+load("@rules_nodejs//nodejs:repositories.bzl", "DEFAULT_NODE_VERSION", "nodejs_register_toolchains")
+
+nodejs_register_toolchains(
+    name = "nodejs",
+    node_version = DEFAULT_NODE_VERSION,
+)
+
+load("@aspect_rules_js//npm:npm_import.bzl", "npm_translate_lock")
+
+npm_translate_lock(
+    name = "npm",
+    npmrc = "//web:.npmrc",
+    pnpm_lock = "//web:pnpm-lock.yaml",
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+
+load("@npm//:repositories.bzl", "npm_repositories")
+
+npm_repositories()
